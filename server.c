@@ -3,435 +3,313 @@
  */
 /* $begin echoservertmain */
 #include "csapp.h"
-#include "gofish.h"
-#include "player.h"
-#include "deck.h"
-#include "card.h"
-#include <stdlib.h>
-#include <stdio.h>
-#include <time.h>
+
+/* Rishabh Singhvi : rsinghvi@umass.edu
+ * Xinyu Cao:  xinyucao@umass.edu
+ */
+#define NUM_CONNECTIONS 20 //server serves a maximum of 20 connections
+
+struct clientfd_map{ //maps names to connfd
+    char name[60];
+    int connfd;
+};
+
+const char* delim = " ";
+
+struct clientfd_map users[NUM_CONNECTIONS];
+int cursor = 0;
+pthread_mutex_t lock; // mutex to make sure threads don't add and remove elements in users array at the same time
+
+void *thread_routine(void *vargp);
+int removeConnfd(int);
+int addConnfd(char*, int);
+void listUsers();
+void handleClient(int);
+int findConnfd(char*);
+char* getName(int);
+
+
+int main(int argc, char** argv)
+{
+    int listenfd, *connfd;
+    socklen_t clientlen;
+    struct sockaddr_storage clientaddr, servaddr;
+    pthread_t tid;
+    rio_t rio;
+    char name[30];
+
+    int i;
+
+    if(pthread_mutex_init(&lock, NULL)!=0)
+    {
+        fprintf(stderr, "Mutex init failed.\n");
+        exit(0);
+    }
+
+    if(argc!=2)
+    {
+        fprintf(stderr, "usage: %s <port>\n", argv[0]);
+        exit(0);
+    }
+
+    listenfd = Open_listenfd(argv[1]);
+
+    while(1)
+    {
+        clientlen = sizeof(struct sockaddr_storage);
+        connfd = Malloc(sizeof(int));
+        *connfd = Accept(listenfd, (SA *)&clientaddr, &clientlen);
+        Rio_readinitb(&rio, *connfd);
+        recv(*connfd, name, 30, MSG_WAITALL);
+        printf("@%s joined\n", name);
+
+        pthread_mutex_lock(&lock); // lock the mutex
+        if((addConnfd(name, *connfd)==-1))
+        {
+            printf("Error adding connection to the users list:\n");
+            pthread_mutex_unlock(&lock); // unlock mutex and return so that socket could be closed
+        }
+
+        /*for(i=0; i<cursor; i++)
+        {
+            printf("%s, %d\n", users[i].name, users[i].connfd);
+        }*/
+
+
+        pthread_mutex_unlock(&lock);
+
+        Pthread_create(&tid, NULL, thread_routine, connfd);
+    }
+    pthread_mutex_destroy(&lock);
+    return 0;
+}
+
+
+/*
+ *
+ * function: removeConnfd(int)
+ * "Removes" connfd from the users array after a user has disconnected
+ * Shifts everything to the left to make sure no "holes" in the array
+ * 
+*/ 
+int removeConnfd(int _connfd)
+{
+    int i, p;
+    for(i = 0; i < cursor; i++)
+    {
+        if(users[i].connfd == _connfd)
+        {
+            p = i;
+            break;
+        }
+    }
+    if(i == cursor) // if i reaches cursor value, no such connfd in the array
+    {
+        return -1;
+    }
+    if(p==(cursor-1)) // if p is the last value in the array, just decrease cursor and return
+    {
+        cursor--;
+        return 0;
+    }
+    for(i = p+1; i < cursor; i++) // shift every element in the array after the "found" element to the left
+    {
+        users[i-1] = users[i];
+    }
+    cursor--; //decrease cursor
+    return 0;
+}
+
+/*
+ *
+ * function: addConnfd(int)
+ * Adds connfd to the users array after a user has connected
+ * 
+ * 
+*/ 
+int addConnfd(char* _name, int _connfd)
+{
+    if(cursor == NUM_CONNECTIONS) //if cursor equal to NUM_CONNECTIONS, reached the maximum amount of connections possible
+    {
+        return -1;
+    }
+    strcpy(users[cursor].name, _name);
+    users[cursor].connfd = _connfd;
+    cursor++;
+    return 0;
+}
+
+
+/*
+ *
+ * function: findConnfd(int)
+ * Given a name, finds the connfd of the user. Names are case sensitive.
+ * 
+ * 
+*/ 
+int findConnfd(char* _name)
+{
+    int i;
+    for(i = 0; i < cursor; i++)
+    {
+        if(strcmp(users[i].name, _name)==0)
+        {
+            return users[i].connfd;
+        }
+    }
+    return -1;
+}
+
+void* thread_routine(void *vargp)
+{
+    int connfd = (*(int*)vargp);
+    Pthread_detach(pthread_self());
+    Free(vargp);
+    handleClient(connfd);
+    Close(connfd);
+    return NULL;
+}
+
+
+
+void handleClient(int connfd)
+{
+    int n;
+    char buf[MAXLINE];
+    char name[30];
+    char sendbuf[MAXLINE];
+    char* tempbuf[MAXLINE], *token, *msgbuf[MAXLINE]; 
+    
+    rio_t rio;
+
+    Rio_readinitb(&rio, connfd);
+
+    //Rio_readlineb(&rio, name, MAXLINE); // client sends name of the user to server
+    //printf("@%s joined\n", name); // comment this out later
+    
+    
+    //while((n = Rio_readlineb(&rio, buf, MAXLINE))!=0)
+    while(1)
+    {
+	recv(connfd, buf, MAXLINE, NULL);
+        if(buf==NULL)
+        {
+            continue;
+        }
+
+        if(strcmp(buf, "list-users\n")==0) //if user typed list-users
+        {
+            listUsers(msgbuf);
+	    send(connfd, msgbuf, MAXLINE, NULL);
+            continue;
+        }
+        else if(strcmp(buf, "quit\n")==0) //if user typed quit
+        {
+            strcpy(msgbuf, "Goodbye!");
+            //Rio_writen(connfd, buf, strlen(buf));
+	    send(connfd, msgbuf, MAXLINE, NULL); 
+            pthread_mutex_lock(&lock);
+            if((removeConnfd(connfd)==-1)) // "remove" connfd from the array
+            {
+                printf("Error removing connection to the users list:\n");
+                pthread_mutex_unlock(&lock);
+                exit(0);
+            }
+            pthread_mutex_unlock(&lock);
+            //printf("@%s left\n", name);
+            return;    
+        }
+        else
+	{
+	
+	    
+		
+	    strcpy(tempbuf, buf); // copy data into a new buffer because buf will lose data
+            int msgto; // variable to hold the connfd of the person to receive this message
+
+		
+            token = strtok(buf, delim);
+	
+		
+            if(token[0]!='@')
+            {
+                continue;
+
+            }
+		
+            if((msgto = findConnfd(&token[1]))==-1) // if no such connfd exists
+            {
+                continue;
+            }
+
+            
+            strcpy(msgbuf, "@");
+            strcat(msgbuf, getName(connfd));
+	    strcat(msgbuf, delim);
+            token = strtok(tempbuf, delim);
+	    while(token!=NULL)
+            {
+                if(token[0]!='@')
+                {
+                    strcat(msgbuf, token);
+                    strcat(msgbuf, delim);
+                }
+                token = strtok(NULL, delim);
+            }
+
+          
+            send(msgto, msgbuf, MAXLINE, NULL);
+	    
+            
+        }
+    }
+
+}
+
+char* getName(int connfd)
+{
+    int i;
+    for(i = 0; i < cursor; i++)
+    {
+        if(users[i].connfd == connfd)
+        {
+            return users[i].name;
+        }
+    }
+    return NULL;
+}
+void listUsers(char* buf)
+{
+    int i;
+    strcpy(buf, "\0");
+    
+    for(i = 0; i < cursor; i++)
+    {
+    //    printf("@%s\n", users[i].name);
+    	strcat(buf, "@");
+	strcat(buf, users[i].name);
+	strcat(buf, "\n");
+    }
+}
+
+
+
+
+
+
+/*void *thread(void *vargp);
 
 void echo(int connfd)
 {
-	rio_t rio;
-	char buf[MAXLINE];
-    
+    int n;
+    char buf[MAXLINE];
+    rio_t rio;
 
-    Rio_readinitb(&rio, connfd); //initialize fd
-	
-	char c = 'Y'; //signal to play another game or not
-	while(c == 'Y'){ //game loop
-		int turn = 0; // 0 for user turn, 1 for computer turn
-		shuffle();
-		reset_player(&user);
-		reset_player(&computer);
-		deal_player_cards(&user);
-		deal_player_cards(&computer);
-	 	
-		
-	    strcpy(buf,"Shuffling deck...\n");
-		Rio_writen(connfd, buf, strlen(buf));
-		
-		
-		while((game_over(&user) == 0) && (game_over(&computer) == 0)){ //turn loop start
-			 
-			if(turn == 0){ //user turn
-				if(user.card_list == NULL) add_card(&user, next_card());
-
-				//report()!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1
-				
-				strcpy(buf, "\nPlayer 1's Hand-");
-				Rio_writen(connfd, buf, strlen(buf));
-				struct hand* iterator = user.card_list;
-	
-	
-				while(iterator != NULL){
-					if(iterator->top.rank == '1') {
-						sprintf(buf,"10%c ", iterator->top.suit);
-						Rio_writen(connfd, buf, strlen(buf));
-					}	
-					else{
-						sprintf(buf, "%c%c ", iterator->top.rank, iterator->top.suit);
-						Rio_writen(connfd, buf, strlen(buf));
-					}
-					iterator = iterator->next;
-				}
-
-	
-				strcpy(buf, "\nPlayer 1's Book-");	
-				Rio_writen(connfd, buf, strlen(buf));
-				int i = 0;
-				while(user.book[i] != 0){
-				if(user.book[i] == '1'){
-					strcpy(buf, "10 ");
-					Rio_writen(connfd, buf, strlen(buf));
-				}
-				else{
-					sprintf(buf, "%c ", user.book[i]);
-					Rio_writen(connfd, buf, strlen(buf));
-				}
-				i++;
-				}
-				i = 0;
-				strcpy(buf, "\nPlayer 2's Book-");
-				Rio_writen(connfd, buf, strlen(buf));
-				while(computer.book[i] != 0){
-				if(computer.book[i] == '1'){
-					strcpy(buf, "10 ");
-					Rio_writen(connfd, buf, strlen(buf));
-				}
-				else{
-					sprintf(buf, "%c ", computer.book[i]);
-					Rio_writen(connfd, buf, strlen(buf));
-				}
-				i++;
-				}
-				
-		
-
-				//userplay() !!!!!
-				char c; //user asks for a rank he has          
-				do{
-					strcpy(buf,"\nPlayer 1's turn, enter a Rank:\n");
-					Rio_writen(connfd, buf, strlen(buf));
-
-					strcpy(buf, "stop\n");
-					Rio_writen(connfd, buf, strlen(buf));
-	
-					Rio_readlineb(&rio, buf, strlen(buf));
-					//Fputs(buf, stdout);
-
-					c = buf[0];
-					
- 					if(search(&user, c) == 0){
-						strcpy(buf,"Error - must have at least one card from rank to play\n");
-						Rio_writen(connfd, buf, strlen(buf));
-					}
-				}	
-				while(search(&user, c) == 0);
-				char uc = c;
-
-				//Rio_readlineb(&rio, buf, MAXLINE);
-				if(search(&computer, uc) == 0){ //computer dont have the rank user ask for, gofish
-					if(uc == '1') {
-						strcpy(buf, "    - Player 2 has no 10's\n");
-						Rio_writen(connfd, buf, strlen(buf));
-					}
-					else {
-						sprintf(buf,  "    - Player 2 has no %c's\n", uc);
-						Rio_writen(connfd, buf, strlen(buf));
-					}
-					struct card* newcard = next_card(); //pick a new card
-					
-					add_card(&user, newcard); //add the new card to user's hand
-					if(newcard->rank == '1'){
-						sprintf(buf, "    - Go Fish, Player 1 draws 10%c\n", newcard->suit);
-						Rio_writen(connfd, buf, strlen(buf));
-					}
-					else {
-						sprintf(buf,  "    - Go Fish, Player 1 draws %c%c\n", newcard->rank, newcard->suit); //report the new card
-						Rio_writen(connfd, buf, strlen(buf));
-					}
-					
-					char mm = check_add_book(&user);
-					if( mm != 0){
-						if(mm == '1') {
-							strcpy(buf, "    - Player 1 books 10\n");
-							Rio_writen(connfd, buf, strlen(buf));
-						}
-						else {
-							sprintf(buf,  "    - Player 1 books %c\n", mm);
-							Rio_writen(connfd, buf, strlen(buf));
-							}
-						strcpy(buf, "    - Player 1 gets another turn\n");
-						Rio_writen(connfd, buf, strlen(buf));
-					} 
-					else{ //no book added
-						if(newcard->rank != uc) { //new card is not the one required, switch turn
-							turn = 1; //swith to computer turn
-							strcpy(buf, "    - Player 2's turn");
-							Rio_writen(connfd, buf, strlen(buf));
-						}
-						else { //new card is the one required, user get another turn
-							strcpy(buf, "    - Player 1 gets another turn\n");
-							Rio_writen(connfd, buf, strlen(buf));							
-						}
-					}
-					continue;	
-					
-						
-					
-				}
-				else{  //computer has the rank user ask for
-					strcpy(buf, "    - Player 2 has ");					
-					Rio_writen(connfd, buf, strlen(buf));
-
-					//reportrank###################################3
-					iterator = computer.card_list;
-					while(iterator != NULL){
-						if(iterator->top.rank == uc){
-							sprintf(buf,"%c%c ", uc, iterator->top.suit);
-							Rio_writen(connfd, buf, strlen(buf));
-						}
-						iterator = iterator->next;
-					}
-					
-					strcpy(buf, "\n    - Player 1 has ");
-
-					//reportrank###################################3
-					struct hand* iterator = user.card_list;
-					while(iterator != NULL){
-						if(iterator->top.rank == uc){
-							sprintf(buf,"%c%c ", uc, iterator->top.suit);
-							Rio_writen(connfd, buf, strlen(buf));
-						}
-						iterator = iterator->next;
-					}
-
-					transfer_cards(&computer, &user, uc);
-					if(check_add_book(&user) == uc){
-						if(uc == '1') {strcpy(buf, "\n    - Player 1 books 10"); Rio_writen(connfd, buf, strlen(buf));}
-						else {sprintf(buf,  "\n    - Player 1 books %c", uc); Rio_writen(connfd, buf, strlen(buf));}
-						strcpy(buf, "\n    - Player 1 gets another turn\n");
-						Rio_writen(connfd, buf, strlen(buf));
-					}
-					else{
-							strcpy(buf, "\n    - Player 2's turn");
-							Rio_writen(connfd, buf, strlen(buf));
-							turn = 1;
-						} //switch to computer's turn
-					continue;
-				}
-			}
-
-			else{ //computer turn $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
-				if(computer.card_list == NULL) add_card(&computer, next_card());
-				//report()!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!1
-				strcpy(buf, "\n");
-				Rio_writen(connfd, buf, strlen(buf));
-				strcpy(buf, "\nPlayer 1's Hand-");
-				Rio_writen(connfd, buf, strlen(buf));
-				struct hand* iterator = user.card_list;
-	
-	
-				while(iterator != NULL){
-					if(iterator->top.rank == '1') {
-						sprintf(buf,"10%c ", iterator->top.suit);
-						Rio_writen(connfd, buf, strlen(buf));
-					}	
-					else{
-						sprintf(buf, "%c%c ", iterator->top.rank, iterator->top.suit);
-						Rio_writen(connfd, buf, strlen(buf));
-					}
-					iterator = iterator->next;
-				}
-
-				strcpy(buf, "\nPlayer 1's Book-");	
-				Rio_writen(connfd, buf, strlen(buf));
-				int i = 0;
-				while(user.book[i] != 0){
-				if(user.book[i] == '1'){
-					strcpy(buf, "10 ");
-					Rio_writen(connfd, buf, strlen(buf));
-				}
-				else{
-					sprintf(buf, "%c ", user.book[i]);
-					Rio_writen(connfd, buf, strlen(buf));
-				}
-				i++;
-				}
-				i = 0;
-				strcpy(buf, "\nPlayer 2's Book-");
-				Rio_writen(connfd, buf, strlen(buf));
-				while(computer.book[i] != 0){
-				if(computer.book[i] == '1'){
-					strcpy(buf, "10 ");
-					Rio_writen(connfd, buf, strlen(buf));
-				}
-				else{
-					sprintf(buf, "%c ", computer.book[i]);
-					Rio_writen(connfd, buf, strlen(buf));
-				}
-				i++;
-				}
-
-				//computer_play!!!!!!!!!!!!!!!!!!!!!!1
-				int random;	
-				char ranklist[14] = "234567891JKQA";
-				srand(time(NULL));
-				do{
-					random = rand() % 12;
-				}
-				while(search(&computer, ranklist[random]) == 0);
-				if(ranklist[random] == '1') {strcpy(buf,"\nPlayer 2's turn, enter a Rank:10");Rio_writen(connfd, buf, strlen(buf));}
-				else {sprintf(buf, "\nPlayer 2's turn, enter a Rank:%c", ranklist[random]);Rio_writen(connfd, buf, strlen(buf));}
-				char cc = ranklist[random];
-
-
-
-
-				if(search(&user, cc) == 0){ //user dont have the rank user ask for, gofish
-					if(cc == '1') {strcpy(buf, "\n    - Player 1 has no 10's");Rio_writen(connfd, buf, strlen(buf));}
-					else {sprintf(buf, "\n    - Player 1 has no %c's", cc);Rio_writen(connfd, buf, strlen(buf));}
-					struct card* newcard = next_card(); //pick a new card
-					add_card(&computer, newcard); //add the new card to user's hand
-					strcpy(buf, "\n    - Go Fish, Player 2 draws a card"); 
-					Rio_writen(connfd, buf, strlen(buf));
-					char mm = check_add_book(&computer);
-					if( mm != 0){
-						if(mm == '1') {strcpy(buf, "\n    - Player 2 books 10");Rio_writen(connfd, buf, strlen(buf));}
-						else {sprintf(buf,"\n    - Player 2 books %c", mm);Rio_writen(connfd, buf, strlen(buf));}
-						strcpy(buf, "\n    - Player 2 gets another turn");
-						Rio_writen(connfd, buf, strlen(buf));
-					} 
-					else{
-						if(newcard->rank != cc){
-							turn = 0; //swith to user turn
-							strcpy(buf, "\n    - Player 1's turn\n");
-							Rio_writen(connfd, buf, strlen(buf));
-						}
-						else {strcpy(buf, "\n    - Player 2 gets another turn\n");Rio_writen(connfd, buf, strlen(buf));}
-					}
-					continue;
-				}
-				else{  //user has the rank user ask for
-					strcpy(buf, "\n    - Player 1 has ");			
-					Rio_writen(connfd, buf, strlen(buf));
-					//reportrank###############################
-					iterator = user.card_list;
-					while(iterator != NULL){
-						if(iterator->top.rank == cc){
-							sprintf(buf, "%c%c ", cc, iterator->top.suit);
-							Rio_writen(connfd, buf, strlen(buf));
-						}
-						iterator = iterator->next;
-					}
-						
-					strcpy(buf, "\n    - Player 2 has ");
-					Rio_writen(connfd, buf, strlen(buf));
-					//reportrank###############################
-					struct hand* iterator = computer.card_list;
-					while(iterator != NULL){
-						if(iterator->top.rank == cc){
-							sprintf(buf, "%c%c ", cc, iterator->top.suit);
-							Rio_writen(connfd, buf, strlen(buf));
-						}
-						iterator = iterator->next;
-					}
-					
-					transfer_cards(&user, &computer, cc);
-					if(check_add_book(&computer) == cc){
-						if(cc == '1') {
-							strcpy(buf, "\n    - Player 2 books 10");
-							Rio_writen(connfd, buf, strlen(buf));
-						}
-						else {
-							sprintf(buf,"\n    - Player 2 books %c", cc);
-							Rio_writen(connfd, buf, strlen(buf));
-						}
-						strcpy(buf, "\n    - Player 2 gets another turn\n");
-						Rio_writen(connfd, buf, strlen(buf));
-					}
-					else{
-							strcpy(buf, "\n    - Player 1's turn\n");
-							Rio_writen(connfd, buf, strlen(buf));
-							turn = 0;
-						}//switch to user's turn
-					
-					continue;
-				}
-
-			}
-		}//turn loop ends*/
-	 	
-		//report in the end of the game!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-	
-				//strcpy(buf, "\n");
-				//Rio_writen(connfd, buf, strlen(buf));
-				strcpy(buf, "\nPlayer 1's Hand-");
-				Rio_writen(connfd, buf, strlen(buf));
-				struct hand* iterator = user.card_list;
-	
-	
-				while(iterator != NULL){
-					if(iterator->top.rank == '1') {
-						sprintf(buf,"10%c ", iterator->top.suit);
-						Rio_writen(connfd, buf, strlen(buf));
-					}	
-					else{
-						sprintf(buf, "%c%c ", iterator->top.rank, iterator->top.suit);
-						Rio_writen(connfd, buf, strlen(buf));
-					}
-					iterator = iterator->next;
-				}
-
-	
-				strcpy(buf, "\nPlayer 1's Book-");	
-				Rio_writen(connfd, buf, strlen(buf));
-				int i = 0;
-				while(user.book[i] != 0){
-				if(user.book[i] == '1'){
-					strcpy(buf, "10 ");
-					Rio_writen(connfd, buf, strlen(buf));
-				}
-				else{
-					sprintf(buf, "%c ", user.book[i]);
-					Rio_writen(connfd, buf, strlen(buf));
-				}
-				i++;
-				}
-				i = 0;
-				strcpy(buf, "\nPlayer 2's Book-");
-				Rio_writen(connfd, buf, strlen(buf));
-				while(computer.book[i] != 0){
-				if(computer.book[i] == '1'){
-					strcpy(buf, "10 ");
-					Rio_writen(connfd, buf, strlen(buf));
-				}
-				else{
-					sprintf(buf, "%c ", computer.book[i]);
-					Rio_writen(connfd, buf, strlen(buf));
-				}
-				i++;
-				}
-				
-
-
-
-
-	
-		if(user.book[6] != 0){
-			sprintf(buf, "\nPlayer 1 Wins! %d-%d", book_count(&user), book_count(&computer)); //user wins
-			Rio_writen(connfd, buf, strlen(buf));
-		}
-		else{
-			sprintf(buf,  "\nPlayer 2 Wins! %d-%d", book_count(&computer), book_count(&user)); //computer wins
-			Rio_writen(connfd, buf, strlen(buf));
-		}
-		strcpy(buf, "\n");
-		Rio_writen(connfd, buf, strlen(buf));
-		strcpy(buf, "\nDo you want to play again [Y/N]: \n"); //whether to play again
-		Rio_writen(connfd, buf, strlen(buf));
-
-		strcpy(buf, "stop\n");
-		Rio_writen(connfd, buf, strlen(buf));
-
-		Rio_readlineb(&rio, buf, strlen(buf));
-		//Fputs(buf, stdout);
-		c = buf[0];
-		if(c == 'N') {
-		strcpy(buf, "Exiting.\n");
-		Rio_writen(connfd, buf, strlen(buf));
-		break;
-		}
-		else if(c == 'Y'){
-			strcpy(buf, "\n");
-			Rio_writen(connfd, buf, strlen(buf));
-		}
- 		
-	} // game loop ends
-	
-
+    Rio_readinitb(&rio, connfd);
+    while((n = Rio_readlineb(&rio, buf, MAXLINE)) != 0) {
+        printf("server received %d bytes\n", n);
+        Rio_writen(connfd, buf, n);
+    }
 }
 
 int main(int argc, char **argv) 
@@ -439,30 +317,30 @@ int main(int argc, char **argv)
     int listenfd, *connfdp;
     socklen_t clientlen;
     struct sockaddr_storage clientaddr;
-	//char client_hostname[MAXLINE], client_port[MAXLINE];
-	
-    if (argc != 1) {
-	fprintf(stderr, "usage: %s\n", argv[0]);
+    pthread_t tid; 
+
+    if (argc != 2) {
+	fprintf(stderr, "usage: %s <port>\n", argv[0]);
 	exit(0);
     }
-    listenfd = Open_listenfd("5000");
+    listenfd = Open_listenfd(argv[1]);
 
     while (1) {
         clientlen=sizeof(struct sockaddr_storage);
-		connfdp = Malloc(sizeof(int)); //line:conc:echoservert:beginmalloc
-		*connfdp = Accept(listenfd, (SA *) &clientaddr, &clientlen); //line:conc:echoservert:endmalloc
-		
-		printf("@Player1 joined the game\n");
-		printf("Ready to start!\n");
-		printf("\n");
-		echo(*connfdp);
-		Close(*connfdp);
-	
+	connfdp = Malloc(sizeof(int)); //line:conc:echoservert:beginmalloc
+	*connfdp = Accept(listenfd, (SA *) &clientaddr, &clientlen); //line:conc:echoservert:endmalloc
+	Pthread_create(&tid, NULL, thread, connfdp);
     }
-	Free(connfdp);
-
-	
 }
 
-
+/* Thread routine */
+/*void *thread(void *vargp) 
+{  
+    int connfd = *((int *)vargp);
+    Pthread_detach(pthread_self()); //line:conc:echoservert:detach
+    Free(vargp);                    //line:conc:echoservert:free
+    echo(connfd);
+    Close(connfd);
+    return NULL;
+}
 /* $end echoservertmain */
